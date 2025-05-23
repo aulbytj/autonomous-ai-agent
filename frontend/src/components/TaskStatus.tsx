@@ -33,6 +33,7 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
   const handleWebSocketMessageRef = useRef<(event: MessageEvent) => void>(() => {});
   const handleWebSocketErrorRef = useRef<(event: Event) => void>(() => {});
   const attemptReconnectRef = useRef<() => Promise<void>>(async () => {});
+  const isMountedRef = useRef(true);
 
   // Function to calculate reconnect delay with exponential backoff
   const getReconnectDelay = useCallback((attempt: number): number => {
@@ -96,8 +97,8 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
     setConnectionStatus('disconnected');
   }, []);
 
-  // Forward declaration of initWebSocket to avoid TypeScript errors
-  let initWebSocket: () => Promise<void>;
+  // Define initWebSocket within useCallback to avoid closure issues
+  const initWebSocketRef = useRef<(() => Promise<void>) | null>(null);
 
   // Reconnection logic
   const attemptReconnect = useCallback(async (): Promise<void> => {
@@ -124,18 +125,21 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
     console.log(`Attempting to reconnect (${attemptNumber}/${MAX_RECONNECT_ATTEMPTS}) in ${delay}ms`);
 
     try {
+      // Create a promise that we can properly handle during cleanup
       await new Promise<void>((resolve) => {
         reconnectTimeout.current = setTimeout(async () => {
+          // Only proceed if component is still mounted
+          if (!isMountedRef.current) {
+            console.log('Component unmounted during reconnect timeout, aborting reconnect');
+            return;
+          }
           console.log(`Reconnection attempt ${attemptNumber} in progress...`);
 
           try {
             // Only attempt to reconnect if we don't have a valid connection
             if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
-              try {
-                await initWebSocket();
-              } catch (initError) {
-                console.error('Error during WebSocket initialization:', initError);
-                // Don't rethrow, just log the error
+              if (initWebSocketRef.current) {
+                await initWebSocketRef.current();
               }
             } else {
               console.log('WebSocket already connected, skipping reconnection');
@@ -175,7 +179,7 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
   }, [handleWebSocketMessage, handleWebSocketError, attemptReconnect]);
 
   // Initialize WebSocket connection
-  initWebSocket = useCallback(async (): Promise<void> => {
+  const initWebSocket = useCallback(async (): Promise<void> => {
     if (!taskId) {
       console.error('No taskId provided for WebSocket connection');
       return;
@@ -225,7 +229,8 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
           socket.onerror = onError;
 
           // Set a timeout for the connection attempt
-          const timeout = setTimeout(() => {
+          let timeoutId: NodeJS.Timeout | null = setTimeout(() => {
+            timeoutId = null;
             cleanup();
             reject(new Error('WebSocket connection timeout'));
             try {
@@ -237,12 +242,18 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
 
           // Update handlers to clean up timeout
           socket.onopen = () => {
-            clearTimeout(timeout);
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+              timeoutId = null;
+            }
             onOpen();
           };
 
           socket.onerror = (error) => {
-            clearTimeout(timeout);
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+              timeoutId = null;
+            }
             onError(error);
           };
         } catch (error) {
@@ -301,6 +312,11 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
       // This is a common source of the createUnhandledError in Next.js
     }
   }, [taskId, closeWebSocket]);
+
+  // Store the initWebSocket function in a ref for access throughout the component
+  useEffect(() => {
+    initWebSocketRef.current = initWebSocket;
+  }, [initWebSocket]);
 
   // Initialize WebSocket and fetch initial task data
   useEffect(() => {
@@ -361,10 +377,12 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
       if (isMounted) {
         // Initialize WebSocket after fetching initial task data
         try {
-          initWebSocket().catch((error) => {
-            console.error('Failed to initialize WebSocket:', error);
-            // Don't rethrow, just log the error
-          });
+          if (initWebSocketRef.current) {
+            initWebSocketRef.current().catch((error) => {
+              console.error('Failed to initialize WebSocket:', error);
+              // Don't rethrow, just log the error
+            });
+          }
         } catch (error) {
           console.error('Error during WebSocket initialization:', error);
           // Don't rethrow, just log the error
@@ -378,7 +396,14 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
     // Cleanup function
     return () => {
       isMounted = false;
+      isMountedRef.current = false;
       console.log('Cleaning up WebSocket connection');
+
+      // Clear any existing reconnect timeout
+      if (reconnectTimeout.current) {
+        clearTimeout(reconnectTimeout.current);
+        reconnectTimeout.current = null;
+      }
 
       // Close WebSocket connection if it exists
       if (ws.current) {
@@ -390,7 +415,7 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
           ws.current.onclose = null;
 
           // Only close if not already in closing/closed state
-          if (ws.current.readyState === WebSocket.OPEN) {
+          if (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING) {
             ws.current.close(1000, 'Component unmounting');
           }
           ws.current = null;
@@ -553,9 +578,13 @@ const TaskStatus: React.FC<TaskStatusProps> = ({ taskId, darkMode = false }) => 
               <button 
                 onClick={() => {
                   setIsReconnecting(true);
-                  initWebSocket().catch(() => {
+                  if (initWebSocketRef.current) {
+                    initWebSocketRef.current().catch(() => {
+                      setIsReconnecting(false);
+                    });
+                  } else {
                     setIsReconnecting(false);
-                  });
+                  }
                 }}
                 disabled={isReconnecting}
                 className={`px-4 py-2 ${darkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'} text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}

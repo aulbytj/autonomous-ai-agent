@@ -9,7 +9,7 @@ import { FiPlay, FiSun, FiMoon } from 'react-icons/fi';
 
 export default function TaskDetailPage() {
   const params = useParams();
-  const taskId = params.taskId as string;
+  const taskId = params?.taskId as string || '';
   const [showReplay, setShowReplay] = useState(false);
   const { darkMode, toggleDarkMode } = useTheme();
 
