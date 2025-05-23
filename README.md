@@ -1,4 +1,4 @@
-# Context7 MCP
+# Autonomous AI Agent MCP
 
 A FastAPI-based Mission Control Program (MCP) that analyzes tasks and context.
 
